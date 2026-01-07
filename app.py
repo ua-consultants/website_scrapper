@@ -9,15 +9,13 @@ from pptx import Presentation
 from pptx.util import Inches
 from pptx.dml.color import RGBColor
 import time
+import re
 from typing import List, Tuple
 import concurrent.futures
 import zipfile
-import json
 
-# Page config
-st.set_page_config(page_title="Shopify Image Scraper", page_icon="🖼️", layout="wide")
+st.set_page_config(page_title="Shopify Image Scraper", page_icon="🛍️", layout="wide")
 
-# Constants
 IMAGES_PER_PPT = 200
 MAX_WORKERS = 5
 TIMEOUT = 10
@@ -36,7 +34,6 @@ class ShopifyImageScraper:
         })
     
     def get_all_products(self, status_container):
-        """Get all products using Shopify's public API"""
         all_products = []
         page = 1
         
@@ -44,35 +41,24 @@ class ShopifyImageScraper:
         
         while True:
             try:
-                # Shopify's public JSON endpoint
                 url = f"{self.base_url}/products.json?page={page}&limit=250"
                 status_container.write(f"   📄 Fetching products page {page}...")
                 
                 response = self.session.get(url, timeout=TIMEOUT)
                 
-                # Handle 503 errors specifically
-                if response.status_code == 503:
-                    status_container.write(f"   ⚠️ Server unavailable (503). Trying alternative approach...")
-                    return None  # Will trigger fallback
-                
-                if response.status_code == 404:
-                    status_container.write("   ⚠️ Products API endpoint not found (404)")
-                    return None  # Will trigger fallback
-                
-                if response.status_code == 403:
-                    status_container.write("   ⚠️ Access forbidden (403). API may be restricted.")
-                    return None  # Will trigger fallback
+                if response.status_code in [503, 403, 404]:
+                    status_container.write(f"   ⚠️ API error ({response.status_code}). Will try alternative method...")
+                    return None
                 
                 response.raise_for_status()
                 data = response.json()
-                
                 products = data.get('products', [])
                 
                 if not products:
                     break
                 
                 all_products.extend(products)
-                status_container.write(f"   ✅ Found {len(products)} products on page {page} (Total: {len(all_products)})")
+                status_container.write(f"   ✅ Found {len(products)} products (Total: {len(all_products)})")
                 
                 page += 1
                 time.sleep(0.5)
@@ -80,29 +66,23 @@ class ShopifyImageScraper:
                 if page > 100:
                     break
                     
-            except requests.exceptions.RequestException as e:
-                status_container.write(f"   ⚠️ Request error on page {page}: {str(e)[:80]}")
-                return None  # Will trigger fallback
             except Exception as e:
-                status_container.write(f"   ⚠️ Error on page {page}: {str(e)[:80]}")
-                break
+                status_container.write(f"   ⚠️ Error: {str(e)[:60]}")
+                return None
         
         if all_products:
             status_container.write(f"✅ Retrieved {len(all_products)} total products from API")
         return all_products if all_products else None
     
-    def get_products_from_collections(self, status_container):
-        """Fallback: Get products by scraping collection pages"""
+    def get_images_from_collections(self, status_container):
         all_image_urls = []
         
         status_container.write("🔄 Trying alternative method: Scraping collections...")
         
-        # Try common Shopify collection URLs
         collection_urls = [
             f"{self.base_url}/collections/all",
             f"{self.base_url}/collections/all-products",
             f"{self.base_url}/products",
-            f"{self.base_url}/catalog",
         ]
         
         for coll_url in collection_urls:
@@ -114,18 +94,11 @@ class ShopifyImageScraper:
                     status_container.write(f"   ✅ Accessible! Extracting images...")
                     html = response.text
                     
-                    # Extract Shopify CDN images from HTML
-                    cdn_images = re.findall(r'https://cdn\.shopify\.com/s/files/[^"\s<>\']+\.(jpg|jpeg|png|webp|gif)', html, re.IGNORECASE)
-                    
-                    # Also try to find images in JSON within script tags
-                    json_images = re.findall(r'"(https://cdn\.shopify\.com/s/files/[^"]+)"', html)
-                    
+                    cdn_images = re.findall(r'https://cdn\.shopify\.com/s/files/[^"\s<>\']+', html, re.IGNORECASE)
                     all_image_urls.extend(cdn_images)
-                    all_image_urls.extend(json_images)
                     
-                    status_container.write(f"   ✅ Found {len(cdn_images) + len(json_images)} images")
+                    status_container.write(f"   ✅ Found {len(cdn_images)} images")
                     
-                    # If we found images, that's good enough
                     if len(all_image_urls) > 10:
                         break
                         
@@ -133,36 +106,32 @@ class ShopifyImageScraper:
                 status_container.write(f"   ⚠️ Failed: {str(e)[:60]}")
                 continue
         
-        # Remove duplicates
-        unique_urls = list(set([url if isinstance(url, str) else url[0] for url in all_image_urls]))
+        unique_urls = list(set(all_image_urls))
         
         if unique_urls:
-            status_container.write(f"✅ Extracted {len(unique_urls)} image URLs via fallback method")
+            status_container.write(f"✅ Extracted {len(unique_urls)} image URLs via fallback")
         
         return unique_urls
-        """Extract all image URLs from product data"""
+    
+    def extract_image_urls_from_products(self, products, status_container):
         image_urls = []
         
         status_container.write(f"🔍 Extracting images from {len(products)} products...")
         
         for product in products:
             try:
-                # Main product images
                 if 'images' in product:
                     for img in product['images']:
                         if 'src' in img:
                             image_urls.append(img['src'])
                 
-                # Variant images
                 if 'variants' in product:
                     for variant in product['variants']:
                         if 'image_id' in variant and variant.get('image_id'):
-                            # Find the image by ID
                             for img in product.get('images', []):
                                 if img.get('id') == variant['image_id'] and 'src' in img:
                                     image_urls.append(img['src'])
                 
-                # Product image (single)
                 if 'image' in product and product['image']:
                     if 'src' in product['image']:
                         image_urls.append(product['image']['src'])
@@ -170,50 +139,41 @@ class ShopifyImageScraper:
             except Exception:
                 pass
         
-        # Remove duplicates
         unique_urls = list(set(image_urls))
         status_container.write(f"✅ Extracted {len(unique_urls)} unique image URLs")
         
         return unique_urls
     
-    def download_and_validate_image(self, url: str) -> Tuple[str, bytes] or None:
-        """Download and validate a single image"""
+    def download_and_validate_image(self, url: str) -> Tuple[str, bytes]:
         try:
             response = self.session.get(url, timeout=TIMEOUT, stream=True)
             response.raise_for_status()
             
-            # Check size
             content_length = response.headers.get('content-length')
             if content_length and int(content_length) > MAX_FILE_SIZE:
                 return None
             
-            # Download
             img_bytes = b''
             for chunk in response.iter_content(chunk_size=8192):
                 img_bytes += chunk
                 if len(img_bytes) > MAX_FILE_SIZE:
                     return None
             
-            # Check hash
             img_hash = hashlib.sha256(img_bytes).hexdigest()
             if img_hash in self.seen_hashes:
                 return None
             
-            # Validate as image
             img = Image.open(io.BytesIO(img_bytes))
             
-            # Skip tiny images
             if img.width < 100 or img.height < 100:
                 return None
             
-            # Resize if too large
             max_dimension = 1920
             if img.width > max_dimension or img.height > max_dimension:
                 ratio = min(max_dimension/img.width, max_dimension/img.height)
                 new_size = (int(img.width * ratio), int(img.height * ratio))
                 img = img.resize(new_size, Image.Resampling.LANCZOS)
             
-            # Convert to RGB
             if img.mode in ('RGBA', 'LA', 'P'):
                 background = Image.new('RGB', img.size, (255, 255, 255))
                 if img.mode == 'P':
@@ -226,7 +186,6 @@ class ShopifyImageScraper:
             elif img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Save to bytes
             output = io.BytesIO()
             img.save(output, format='JPEG', quality=85, optimize=True)
             final_bytes = output.getvalue()
@@ -238,7 +197,6 @@ class ShopifyImageScraper:
             return None
     
     def download_all_images(self, image_urls: List[str], status_container):
-        """Download all images with progress tracking - updates session state in real-time"""
         valid_images = []
         total = len(image_urls)
         
@@ -254,18 +212,15 @@ class ShopifyImageScraper:
                 
                 if result:
                     valid_images.append(result)
-                    
-                    # CRITICAL: Update session state in real-time
                     st.session_state.downloaded_images = valid_images.copy()
                     
                     if len(valid_images) % 20 == 0:
-                        status_container.write(f"   ✅ Downloaded {len(valid_images)} valid images ({completed}/{total} processed)")
+                        status_container.write(f"   ✅ Downloaded {len(valid_images)} images ({completed}/{total} processed)")
         
-        status_container.write(f"✅ Successfully downloaded {len(valid_images)} valid images!")
+        status_container.write(f"✅ Downloaded {len(valid_images)} valid images!")
         return valid_images
 
 def generate_ppt(images: List[Tuple[str, bytes]], batch_num: int, total_batches: int, domain: str) -> bytes:
-    """Generate a single PowerPoint file"""
     prs = Presentation()
     prs.slide_width = Inches(10)
     prs.slide_height = Inches(5.625)
@@ -331,7 +286,6 @@ def generate_ppt(images: List[Tuple[str, bytes]], batch_num: int, total_batches:
     return output.getvalue()
 
 def create_all_ppts(images: List[Tuple[str, bytes]], domain: str, status_container):
-    """Create multiple PPT files and package in ZIP"""
     num_batches = (len(images) + IMAGES_PER_PPT - 1) // IMAGES_PER_PPT
     
     if num_batches == 1:
@@ -349,17 +303,17 @@ def create_all_ppts(images: List[Tuple[str, bytes]], domain: str, status_contain
             end_idx = min(start_idx + IMAGES_PER_PPT, len(images))
             batch_images = images[start_idx:end_idx]
             
-            status_container.write(f"📊 Generating PPT {batch_idx + 1}/{num_batches} (images {start_idx + 1}-{end_idx})...")
+            status_container.write(f"📊 Generating PPT {batch_idx + 1}/{num_batches}...")
             
             ppt_bytes = generate_ppt(batch_images, batch_idx + 1, num_batches, domain)
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{domain.replace('.', '_')}_batch_{batch_idx + 1}_of_{num_batches}_{timestamp}.pptx"
+            filename = f"{domain.replace('.', '_')}_batch_{batch_idx + 1}_{timestamp}.pptx"
             
             zip_file.writestr(filename, ppt_bytes)
             
             num_slides = (len(batch_images) + IMAGES_PER_SLIDE - 1) // IMAGES_PER_SLIDE
-            status_container.write(f"✅ Completed PPT {batch_idx + 1}/{num_batches} ({len(batch_images)} images, {num_slides} slides)")
+            status_container.write(f"✅ Completed PPT {batch_idx + 1}/{num_batches} ({len(batch_images)} imgs, {num_slides} slides)")
     
     status_container.write(f"🎉 All {num_batches} PowerPoint files created!")
     zip_buffer.seek(0)
@@ -367,27 +321,8 @@ def create_all_ppts(images: List[Tuple[str, bytes]], domain: str, status_contain
 
 def main():
     st.title("🛍️ Shopify Store Image Scraper")
-    st.markdown("**Uses Shopify's Public API** • Works with ANY Shopify store • No bot detection issues")
+    st.markdown("**Dual-Method System** • API + Fallback Scraping • Works with restricted stores")
     
-    with st.expander("ℹ️ How It Works", expanded=False):
-        st.info("""
-        **Shopify API Scraping:**
-        - Uses Shopify's official public `/products.json` API
-        - Works with ANY Shopify store (no bot detection)
-        - Extracts ALL product images automatically
-        - Downloads and validates all images
-        - Creates PPT files with 200 images each (4 per slide)
-        - Automatically packages multiple PPTs in ZIP
-        
-        **Perfect for:**
-        - Shopify stores (thepurplepony.com ✅)
-        - Product catalogs
-        - E-commerce sites on Shopify
-        
-        **Note:** Only works with Shopify-powered websites.
-        """)
-    
-    # Initialize session state for storing images
     if 'downloaded_images' not in st.session_state:
         st.session_state.downloaded_images = []
     if 'scraper_domain' not in st.session_state:
@@ -397,234 +332,141 @@ def main():
     
     url = st.text_input("🌐 Enter Shopify Store URL:", placeholder="https://thepurplepony.com")
     
-    # Show status message about download button with real-time count
     num_cached = len(st.session_state.downloaded_images)
     
     if st.session_state.is_scraping:
-        st.warning(f"⚡ **Scraping in progress... {num_cached} images downloaded so far!** You can download the PPT anytime, even mid-scraping!")
+        st.warning(f"⚡ **Scraping... {num_cached} images downloaded!** You can download PPT anytime!")
     elif not st.session_state.downloaded_images:
-        st.info("ℹ️ **Download PPT button will activate as soon as images start downloading**")
+        st.info("ℹ️ **Button activates as images download**")
     else:
-        st.success(f"✅ **{num_cached} images ready to download!** Use the button below or scrape again for fresh images.")
+        st.success(f"✅ **{num_cached} images ready!**")
     
-    # Create three columns for buttons
     col1, col2, col3 = st.columns([2, 1, 1])
     
     with col1:
-        scrape_button = st.button("🚀 Scrape Shopify Images", type="primary", use_container_width=True)
+        scrape_button = st.button("🚀 Scrape Images", type="primary", use_container_width=True)
     
     with col2:
-        # Show download button if images are available
         if st.session_state.downloaded_images:
             num_images = len(st.session_state.downloaded_images)
-            if st.session_state.is_scraping:
-                download_ppt_button = st.button(f"⚡ Download PPT ({num_images} imgs)", use_container_width=True, type="secondary", help="Download what we have so far!")
-            else:
-                download_ppt_button = st.button(f"📥 Download PPT ({num_images} imgs)", use_container_width=True, type="secondary")
+            icon = "⚡" if st.session_state.is_scraping else "📥"
+            download_ppt_button = st.button(f"{icon} Download PPT ({num_images})", use_container_width=True)
         else:
-            download_ppt_button = st.button("📥 Download PPT (0 imgs)", disabled=True, use_container_width=True, help="Scrape images first to enable this button")
+            download_ppt_button = st.button("📥 Download PPT (0)", disabled=True, use_container_width=True)
     
     with col3:
-        # Refresh button to update count during scraping
         if st.session_state.is_scraping or st.session_state.downloaded_images:
-            if st.button("🔄 Refresh", use_container_width=True, help="Update image count"):
+            if st.button("🔄 Refresh", use_container_width=True):
                 st.rerun()
     
-    # Handle Download PPT button
     if download_ppt_button and st.session_state.downloaded_images:
-        with st.spinner("Generating PowerPoint from cached images..."):
+        with st.spinner("Generating PowerPoint..."):
             try:
-                valid_images = st.session_state.downloaded_images
-                domain = st.session_state.scraper_domain or "shopify_store"
+                ppt_status = st.status("Generating...", expanded=True)
+                result_bytes = create_all_ppts(st.session_state.downloaded_images, 
+                                              st.session_state.scraper_domain or "shopify", 
+                                              ppt_status)
+                ppt_status.update(label="✅ Ready!", state="complete")
                 
-                num_ppts = (len(valid_images) + IMAGES_PER_PPT - 1) // IMAGES_PER_PPT
-                
-                # Create a temporary status for PPT generation
-                ppt_status = st.status("Generating PowerPoint...", expanded=True)
-                
-                result_bytes = create_all_ppts(valid_images, domain, ppt_status)
-                
-                ppt_status.update(label="✅ PowerPoint ready!", state="complete")
+                num_ppts = (len(st.session_state.downloaded_images) + IMAGES_PER_PPT - 1) // IMAGES_PER_PPT
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 
                 if num_ppts == 1:
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"{domain.replace('.', '_')}_shopify_images_{timestamp}.pptx"
-                    
-                    st.download_button(
-                        label="📥 Click to Download PowerPoint",
-                        data=result_bytes,
-                        file_name=filename,
-                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                        type="primary",
-                        key="download_single_ppt"
-                    )
+                    filename = f"shopify_{timestamp}.pptx"
+                    st.download_button("📥 Click to Download", result_bytes, filename, 
+                                     "application/vnd.openxmlformats-officedocument.presentationml.presentation", 
+                                     key="dl1")
                 else:
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"{domain.replace('.', '_')}_shopify_{num_ppts}_files_{timestamp}.zip"
-                    
-                    st.download_button(
-                        label=f"📥 Click to Download ZIP ({num_ppts} PPT files)",
-                        data=result_bytes,
-                        file_name=filename,
-                        mime="application/zip",
-                        type="primary",
-                        key="download_zip_ppt"
-                    )
-                
-                st.success(f"✅ Generated PowerPoint with {len(valid_images)} images!")
-                
+                    filename = f"shopify_{num_ppts}files_{timestamp}.zip"
+                    st.download_button(f"📥 Download ZIP ({num_ppts} files)", result_bytes, filename, 
+                                     "application/zip", key="dl2")
             except Exception as e:
-                st.error(f"Error generating PPT: {str(e)}")
+                st.error(f"Error: {e}")
     
-    # Handle Scrape button
     if scrape_button:
         if not url:
-            st.error("Please enter a valid URL")
+            st.error("Enter a URL")
             return
         
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
         
-        # Set scraping flag
         st.session_state.is_scraping = True
         
         progress_bar = st.progress(0)
-        status_container = st.status("Starting Shopify API scraping...", expanded=True)
+        status_container = st.status("Starting...", expanded=True)
         
         try:
             scraper = ShopifyImageScraper(url)
-            
-            # Store domain immediately
             st.session_state.scraper_domain = scraper.domain
             
-            # Step 1: Get products from API
-            status_container.write("🔍 Phase 1: Fetching products from Shopify API...")
+            status_container.write("🔍 Phase 1: Fetching products...")
             progress_bar.progress(0.1)
             
             products = scraper.get_all_products(status_container)
+            image_urls = []
             
             if not products:
-                st.session_state.is_scraping = False
-                status_container.update(label="❌ No products found", state="error")
-                st.error("""
-                No products found. This could mean:
-                - The site is not a Shopify store
-                - The Shopify API is not publicly accessible
-                - The URL is incorrect
+                status_container.write("🔄 Trying fallback...")
+                progress_bar.progress(0.2)
+                image_urls = scraper.get_images_from_collections(status_container)
                 
-                Try:
-                - Verifying the URL is correct
-                - Checking if it's a Shopify store (look for "myshopify.com" in page source)
-                - Trying the homepage URL
-                """)
-                return
-            
-            progress_bar.progress(0.3)
-            
-            # Step 2: Extract image URLs
-            status_container.write(f"🔍 Phase 2: Extracting images from products...")
-            image_urls = scraper.extract_all_image_urls(products, status_container)
+                if not image_urls:
+                    st.session_state.is_scraping = False
+                    status_container.update(label="❌ No images", state="error")
+                    st.error("Unable to extract images. Try a different store.")
+                    return
+            else:
+                progress_bar.progress(0.3)
+                image_urls = scraper.extract_image_urls_from_products(products, status_container)
             
             if not image_urls:
                 st.session_state.is_scraping = False
-                status_container.update(label="❌ No images found", state="error")
-                st.error("Products found but no images extracted.")
+                status_container.update(label="❌ No images", state="error")
+                st.error("No images found")
                 return
             
             progress_bar.progress(0.5)
-            
-            # Step 3: Download images (updates session state in real-time!)
             status_container.write(f"⬇️ Phase 3: Downloading {len(image_urls)} images...")
-            status_container.write("💡 **Tip: You can click 'Download PPT' or 'Refresh' button anytime to see progress!**")
             
             valid_images = scraper.download_all_images(image_urls, status_container)
             
             if not valid_images:
                 st.session_state.is_scraping = False
                 status_container.update(label="❌ No valid images", state="error")
-                st.error("Images found but all failed download/validation.")
+                st.error("Download failed")
                 return
             
             progress_bar.progress(0.8)
             
-            # Step 4: Generate PPTs
-            status_container.write("📊 Phase 4: Generating PowerPoint presentations...")
-            
-            # Store final images in session state
             st.session_state.downloaded_images = valid_images
             st.session_state.scraper_domain = scraper.domain
             
             result_bytes = create_all_ppts(valid_images, scraper.domain, status_container)
             
             progress_bar.progress(1.0)
-            
-            # Clear scraping flag
             st.session_state.is_scraping = False
-            
             status_container.update(label="✅ Complete!", state="complete")
             
-            # Display results
             num_ppts = (len(valid_images) + IMAGES_PER_PPT - 1) // IMAGES_PER_PPT
             
-            st.balloons()  # Celebration effect!
+            st.balloons()
             
             if num_ppts == 1:
-                st.success(f"🎉 Created PowerPoint with {len(valid_images)} images!")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Total Images", len(valid_images))
-                with col2:
-                    st.metric("Total Slides", (len(valid_images) + IMAGES_PER_SLIDE - 1) // IMAGES_PER_SLIDE)
-                
+                st.success(f"🎉 {len(valid_images)} images!")
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"{scraper.domain.replace('.', '_')}_shopify_images_{timestamp}.pptx"
-                
-                st.download_button(
-                    label="📥 Download PowerPoint",
-                    data=result_bytes,
-                    file_name=filename,
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    type="primary",
-                    key="main_download_single"
-                )
-                
-                st.info("💡 **Tip:** Use the '📥 Download PPT' button at the top to regenerate anytime!")
-                
+                filename = f"{scraper.domain.replace('.', '_')}_{timestamp}.pptx"
+                st.download_button("📥 Download", result_bytes, filename,
+                                 "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                 type="primary", key="main1")
             else:
-                st.success(f"🎉 Created {num_ppts} PowerPoint files with {len(valid_images)} total images!")
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Total Images", len(valid_images))
-                with col2:
-                    st.metric("PPT Files", num_ppts)
-                with col3:
-                    st.metric("ZIP Size", f"{len(result_bytes) / 1024 / 1024:.1f} MB")
-                
+                st.success(f"🎉 {len(valid_images)} images in {num_ppts} PPTs!")
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"{scraper.domain.replace('.', '_')}_shopify_{num_ppts}_files_{timestamp}.zip"
-                
-                st.download_button(
-                    label=f"📥 Download ZIP ({num_ppts} PPT files)",
-                    data=result_bytes,
-                    file_name=filename,
-                    mime="application/zip",
-                    type="primary",
-                    key="main_download_zip"
-                )
-                
-                st.info("💡 **Tip:** Use the '📥 Download PPT' button at the top to regenerate anytime!")
-                
-                with st.expander("📋 What's in the ZIP?"):
-                    for i in range(num_ppts):
-                        start = i * IMAGES_PER_PPT + 1
-                        end = min((i + 1) * IMAGES_PER_PPT, len(valid_images))
-                        slides = (end - start + 1 + IMAGES_PER_SLIDE - 1) // IMAGES_PER_SLIDE
-                        st.write(f"- `batch_{i+1}.pptx` - Images {start}-{end} ({slides} slides)")
+                filename = f"{scraper.domain.replace('.', '_')}_{num_ppts}files_{timestamp}.zip"
+                st.download_button(f"📥 Download ZIP ({num_ppts} files)", result_bytes, filename,
+                                 "application/zip", type="primary", key="main2")
             
-            # Preview
-            st.subheader("🖼️ Preview (First 8 Images)")
+            st.subheader("Preview")
             cols = st.columns(8)
             for i, (url, img_bytes) in enumerate(valid_images[:8]):
                 with cols[i]:
@@ -632,8 +474,8 @@ def main():
         
         except Exception as e:
             st.session_state.is_scraping = False
-            status_container.update(label=f"❌ Error: {str(e)}", state="error")
-            st.error(f"Fatal error: {str(e)}")
+            status_container.update(label=f"❌ Error", state="error")
+            st.error(f"Error: {e}")
             st.exception(e)
 
 if __name__ == "__main__":
