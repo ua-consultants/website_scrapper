@@ -56,7 +56,7 @@ class ImageScraper:
             
             if js_indicators > 10 and static_indicators < 5:
                 status_container.write("⚡ Detected JS-heavy site - using browser automation")
-                return "playwright"
+                return "selenium"
             else:
                 status_container.write("📄 Detected static site - using fast scraping")
                 return "requests"
@@ -70,7 +70,7 @@ class ImageScraper:
         status_container.write(f"🌐 Crawling {self.base_url}...")
         
         try:
-            if method == "playwright":
+            if method == "selenium":
                 pages.extend(self._crawl_with_playwright(status_container))
             else:
                 pages.extend(self._crawl_with_requests(status_container))
@@ -103,34 +103,43 @@ class ImageScraper:
         return urls
     
     def _crawl_with_playwright(self, status_container) -> List[str]:
-        """Crawl using Playwright for JS sites"""
+        """Crawl using Selenium for JS sites"""
         urls = []
         try:
-            from playwright.sync_api import sync_playwright
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.common.by import By
             
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.goto(self.base_url, wait_until="networkidle", timeout=30000)
-                
-                # Scroll to load lazy content
-                for _ in range(3):
-                    page.evaluate("window.scrollBy(0, window.innerHeight)")
-                    time.sleep(0.5)
-                
-                # Extract links
-                links = page.evaluate("""() => {
-                    return Array.from(document.querySelectorAll('a[href]'))
-                        .map(a => a.href)
-                        .filter(href => href.includes('product') || href.includes('shop') || href.includes('collection'));
-                }""")
-                
-                urls = [url for url in links if self.domain in url][:10]
-                browser.close()
+            options = Options()
+            options.add_argument('--headless')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument('--disable-gpu')
+            options.add_argument('--disable-blink-features=AutomationControlled')
+            options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+            
+            driver = webdriver.Chrome(options=options)
+            driver.set_page_load_timeout(30)
+            driver.get(self.base_url)
+            
+            # Scroll to load lazy content
+            for _ in range(3):
+                driver.execute_script("window.scrollBy(0, window.innerHeight)")
+                time.sleep(0.5)
+            
+            # Extract links
+            links = driver.execute_script("""
+                return Array.from(document.querySelectorAll('a[href]'))
+                    .map(a => a.href)
+                    .filter(href => href.includes('product') || href.includes('shop') || href.includes('collection'));
+            """)
+            
+            urls = [url for url in links if self.domain in url][:10]
+            driver.quit()
         except ImportError:
-            status_container.write("⚠️ Playwright not available - using requests fallback")
+            status_container.write("⚠️ Selenium not available - using requests fallback")
         except Exception as e:
-            status_container.write(f"⚠️ Playwright error: {str(e)[:50]}")
+            status_container.write(f"⚠️ Selenium error: {str(e)[:50]}")
         
         return urls
     
@@ -139,7 +148,7 @@ class ImageScraper:
         candidates = []
         
         try:
-            if method == "playwright":
+            if method == "selenium":
                 candidates = self._extract_with_playwright(url)
             else:
                 candidates = self._extract_with_requests(url)
@@ -179,33 +188,40 @@ class ImageScraper:
         return candidates
     
     def _extract_with_playwright(self, url: str) -> List[Dict]:
-        """Extract images using Playwright"""
+        """Extract images using Selenium"""
         candidates = []
         
         try:
-            from playwright.sync_api import sync_playwright
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
             
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.goto(url, wait_until="networkidle", timeout=30000)
-                
-                # Scroll to trigger lazy loading
-                for _ in range(3):
-                    page.evaluate("window.scrollBy(0, window.innerHeight)")
-                    time.sleep(0.3)
-                
-                # Extract image data
-                images = page.evaluate("""() => {
-                    return Array.from(document.querySelectorAll('img')).map(img => ({
-                        url: img.src || img.dataset.src || img.dataset.lazySrc || '',
-                        context: (img.parentElement?.className || '') + ' ' + (img.parentElement?.id || ''),
-                        alt: img.alt || ''
-                    }));
-                }""")
-                
-                candidates = [img for img in images if img['url']]
-                browser.close()
+            options = Options()
+            options.add_argument('--headless')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument('--disable-gpu')
+            options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+            
+            driver = webdriver.Chrome(options=options)
+            driver.set_page_load_timeout(30)
+            driver.get(url)
+            
+            # Scroll to trigger lazy loading
+            for _ in range(3):
+                driver.execute_script("window.scrollBy(0, window.innerHeight)")
+                time.sleep(0.3)
+            
+            # Extract image data
+            images = driver.execute_script("""
+                return Array.from(document.querySelectorAll('img')).map(img => ({
+                    url: img.src || img.dataset.src || img.dataset.lazySrc || '',
+                    context: (img.parentElement?.className || '') + ' ' + (img.parentElement?.id || ''),
+                    alt: img.alt || ''
+                }));
+            """)
+            
+            candidates = [img for img in images if img['url']]
+            driver.quit()
         except Exception as e:
             pass
         
