@@ -33,12 +33,22 @@ class UniversalImageScraper:
         self.visited_urls: Set[str] = set()
         self.seen_hashes: Set[str] = set()
         self.all_images: List[str] = []
+        self.last_debug_info: List[str] = []  # NEW: Store debug info
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
             'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.google.com/',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
         })
     
     def normalize_url(self, url: str) -> str:
@@ -74,28 +84,37 @@ class UniversalImageScraper:
     def extract_all_images(self, html: str, page_url: str) -> List[str]:
         """Extract ALL images from HTML - no filtering"""
         images = []
+        debug_info = []
+        
         try:
             soup = BeautifulSoup(html, 'html.parser')
             
             # CRITICAL: Check for Shopify JSON product data first
+            script_count = 0
             for script in soup.find_all('script'):
-                script_content = script.string
-                if script_content and ('product' in script_content.lower() or 'cdn.shopify.com' in script_content):
-                    # Extract image URLs from JSON/JS
-                    shopify_images = re.findall(r'(https?:)?//cdn\.shopify\.com/s/files/[^"\s<>\']+\.(jpg|jpeg|png|gif|webp|svg)', script_content, re.IGNORECASE)
-                    for img_match in shopify_images:
-                        url = img_match[0] + '//cdn.shopify.com/s/files/' if not img_match[0] else ''
-                        # Extract full URL
-                        full_urls = re.findall(r'(https?:)?//cdn\.shopify\.com/s/files/[^"\s<>\']+', script_content, re.IGNORECASE)
-                        for full_url in full_urls:
-                            if full_url.startswith('//'):
-                                full_url = 'https:' + full_url
-                            elif not full_url.startswith('http'):
-                                full_url = 'https://' + full_url
-                            images.append(full_url)
+                script_count += 1
+                script_content = script.string or ''
+                
+                if 'cdn.shopify.com' in script_content:
+                    debug_info.append(f"Found Shopify CDN in script {script_count}")
+                    # Extract ALL cdn.shopify.com URLs
+                    shopify_urls = re.findall(r'(https?:)?//cdn\.shopify\.com[^\s"\'<>]+', script_content, re.IGNORECASE)
+                    debug_info.append(f"Extracted {len(shopify_urls)} Shopify URLs from script")
+                    
+                    for url in shopify_urls:
+                        if url.startswith('//'):
+                            url = 'https:' + url
+                        # Clean the URL
+                        url = url.split('"')[0].split("'")[0].split(',')[0].split(')')[0]
+                        images.append(url)
+            
+            debug_info.append(f"Total scripts found: {script_count}")
+            debug_info.append(f"Images from scripts: {len(images)}")
             
             # Method 1: <img> tags with all possible attributes
+            img_count = 0
             for img in soup.find_all('img'):
+                img_count += 1
                 # Try multiple attributes
                 src = (img.get('src') or 
                        img.get('data-src') or 
@@ -117,69 +136,39 @@ class UniversalImageScraper:
                         full_url = urljoin(page_url, url)
                         images.append(full_url)
             
-            # Method 2: <picture> tags
-            for picture in soup.find_all('picture'):
-                for source in picture.find_all('source'):
-                    srcset = source.get('srcset') or source.get('data-srcset')
-                    if srcset:
-                        for src in srcset.split(','):
-                            url = src.strip().split()[0]
-                            full_url = urljoin(page_url, url)
-                            images.append(full_url)
+            debug_info.append(f"<img> tags found: {img_count}")
             
-            # Method 3: <source> tags (video posters, etc.)
-            for source in soup.find_all('source'):
-                src = source.get('src')
-                if src and self.is_image_url(src):
-                    full_url = urljoin(page_url, src)
-                    images.append(full_url)
+            # Method 2: Extract ALL URLs from entire HTML and filter for images
+            all_urls = re.findall(r'https?://[^\s"\'<>]+', html)
+            all_urls.extend(re.findall(r'//cdn\.[^\s"\'<>]+', html))
             
-            # Method 4: CSS background images in style attributes
-            for tag in soup.find_all(style=True):
-                style = tag.get('style', '')
-                urls = re.findall(r'url\([\'"]?([^\'"()]+)[\'"]?\)', style)
-                for url in urls:
-                    full_url = urljoin(page_url, url)
-                    images.append(full_url)
+            debug_info.append(f"Total URLs in HTML: {len(all_urls)}")
             
-            # Method 5: <link> tags with image rels
-            for link in soup.find_all('link'):
-                rel = link.get('rel', [])
-                if isinstance(rel, list):
-                    rel = ' '.join(rel)
-                if any(keyword in str(rel).lower() for keyword in ['image', 'icon', 'apple-touch']):
-                    href = link.get('href')
-                    if href:
-                        full_url = urljoin(page_url, href)
-                        images.append(full_url)
+            url_images = 0
+            for url in all_urls:
+                url = url.split('"')[0].split("'")[0].split(',')[0].split(')')[0]
+                if url.startswith('//'):
+                    url = 'https:' + url
+                if self.is_image_url(url):
+                    images.append(url)
+                    url_images += 1
             
-            # Method 6: <meta> tags with image properties
-            for meta in soup.find_all('meta'):
-                property_val = meta.get('property', '')
-                name_val = meta.get('name', '')
-                if 'image' in property_val.lower() or 'image' in name_val.lower():
-                    content = meta.get('content')
-                    if content:
-                        full_url = urljoin(page_url, content)
-                        images.append(full_url)
-            
-            # Method 7: Look for data attributes that might contain images
-            for tag in soup.find_all(True):
-                for attr, value in tag.attrs.items():
-                    if isinstance(value, str) and attr.startswith('data-') and self.is_image_url(value):
-                        full_url = urljoin(page_url, value)
-                        images.append(full_url)
+            debug_info.append(f"Image URLs from regex: {url_images}")
             
         except Exception as e:
-            pass
+            debug_info.append(f"ERROR: {str(e)}")
         
         # Filter to keep only valid image URLs and remove duplicates
         valid_images = []
         seen = set()
         for img_url in images:
-            if img_url not in seen and self.is_image_url(img_url):
-                valid_images.append(img_url)
-                seen.add(img_url)
+            if img_url and img_url not in seen:
+                if self.is_image_url(img_url):
+                    valid_images.append(img_url)
+                    seen.add(img_url)
+        
+        # Store debug info
+        self.last_debug_info = debug_info
         
         return valid_images
     
@@ -190,6 +179,10 @@ class UniversalImageScraper:
         
         try:
             url_lower = url.lower()
+            
+            # CRITICAL: Shopify CDN detection
+            if 'cdn.shopify.com' in url_lower:
+                return True
             
             # Remove query parameters for extension check
             url_without_query = url_lower.split('?')[0].split('#')[0]
@@ -209,7 +202,7 @@ class UniversalImageScraper:
                 '/image/', '/img/', '/photo/', '/picture/', '/pic/', 
                 '/media/', '/asset/', '/upload/', '/content/', 
                 '/gallery/', '/thumbnail/', '/thumb/', '/banner/',
-                '/icon/', '/logo/', '/bg/', '/background/'
+                '/icon/', '/logo/', '/bg/', '/background/', '/files/'
             ]
             
             if any(keyword in url_lower for keyword in image_keywords):
@@ -325,6 +318,11 @@ class UniversalImageScraper:
                     
                     # Extract images
                     page_images = self.extract_all_images(html, url)
+                    
+                    # Show debug info
+                    if self.last_debug_info:
+                        for debug_msg in self.last_debug_info:
+                            status_container.write(f"      🔍 DEBUG: {debug_msg}")
                     
                     # Fallback: if no images found, try aggressive extraction
                     if not page_images:
