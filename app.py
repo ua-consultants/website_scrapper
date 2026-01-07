@@ -214,7 +214,9 @@ class ImageScraper:
             
             for future in concurrent.futures.as_completed(futures):
                 processed += 1
-                progress_bar.progress(min(processed / total, 1.0))
+                # Progress from 0.30 to 0.75 (download phase)
+                download_progress = 0.30 + (0.45 * processed / total)
+                progress_bar.progress(min(download_progress, 0.75))
                 result = future.result()
                 if result:
                     valid_images.append(result)
@@ -362,27 +364,27 @@ def main():
             scraper = ImageScraper(url)
             
             # Step 1: Analyze site
-            progress_bar.progress(5)
+            progress_bar.progress(0.05)
             method = scraper.analyze_site(status_container)
             
             # Step 2: Crawl pages
-            progress_bar.progress(10)
+            progress_bar.progress(0.10)
             pages = scraper.crawl_pages(status_container)
             
             # Step 3: Extract and filter images
-            progress_bar.progress(15)
+            progress_bar.progress(0.15)
             all_candidates = []
             
             for i, page in enumerate(pages):
                 status_container.write(f"📄 Scraping page {i+1}/{len(pages)}")
                 candidates = scraper.extract_candidate_images(page)
                 all_candidates.extend(candidates)
-                progress_bar.progress(15 + (10 * (i+1) / len(pages)))
+                progress_bar.progress(0.15 + (0.10 * (i+1) / len(pages)))
             
             status_container.write(f"🔍 Found {len(all_candidates)} candidate images")
             
             # Step 4: Filter product images
-            progress_bar.progress(25)
+            progress_bar.progress(0.25)
             filtered_urls = scraper.filter_product_images(all_candidates)
             status_container.write(f"✅ Filtered to {len(filtered_urls)} product images")
             
@@ -392,7 +394,7 @@ def main():
                 return
             
             # Step 5: Download and validate (up to MAX_TOTAL_IMAGES)
-            progress_bar.progress(30)
+            progress_bar.progress(0.30)
             status_container.write(f"⬇️ Downloading up to {MAX_TOTAL_IMAGES} images...")
             
             valid_images = scraper.download_and_validate_images(
@@ -410,7 +412,7 @@ def main():
             status_container.write(f"✅ Successfully downloaded {len(valid_images)} unique images")
             
             # Step 6: Generate multiple PPTs in batches
-            progress_bar.progress(80)
+            progress_bar.progress(0.80)
             num_ppts = (len(valid_images) + IMAGES_PER_PPT - 1) // IMAGES_PER_PPT
             status_container.write(f"📊 Generating {num_ppts} PowerPoint file(s) ({IMAGES_PER_PPT} images each)...")
             
@@ -420,7 +422,7 @@ def main():
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"{scraper.domain.replace('.', '_')}_products_{timestamp}.pptx"
                 
-                progress_bar.progress(100)
+                progress_bar.progress(1.0)
                 status_container.update(label="✅ Complete!", state="complete")
                 
                 num_slides = (len(valid_images) + images_per_slide - 1) // images_per_slide
@@ -449,7 +451,7 @@ def main():
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 zip_filename = f"{scraper.domain.replace('.', '_')}_products_{num_ppts}_files_{timestamp}.zip"
                 
-                progress_bar.progress(100)
+                progress_bar.progress(1.0)
                 status_container.update(label="✅ Complete!", state="complete")
                 
                 total_slides = (len(valid_images) + images_per_slide - 1) // images_per_slide
