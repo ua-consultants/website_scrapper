@@ -77,6 +77,23 @@ class UniversalImageScraper:
         try:
             soup = BeautifulSoup(html, 'html.parser')
             
+            # CRITICAL: Check for Shopify JSON product data first
+            for script in soup.find_all('script'):
+                script_content = script.string
+                if script_content and ('product' in script_content.lower() or 'cdn.shopify.com' in script_content):
+                    # Extract image URLs from JSON/JS
+                    shopify_images = re.findall(r'(https?:)?//cdn\.shopify\.com/s/files/[^"\s<>\']+\.(jpg|jpeg|png|gif|webp|svg)', script_content, re.IGNORECASE)
+                    for img_match in shopify_images:
+                        url = img_match[0] + '//cdn.shopify.com/s/files/' if not img_match[0] else ''
+                        # Extract full URL
+                        full_urls = re.findall(r'(https?:)?//cdn\.shopify\.com/s/files/[^"\s<>\']+', script_content, re.IGNORECASE)
+                        for full_url in full_urls:
+                            if full_url.startswith('//'):
+                                full_url = 'https:' + full_url
+                            elif not full_url.startswith('http'):
+                                full_url = 'https://' + full_url
+                            images.append(full_url)
+            
             # Method 1: <img> tags with all possible attributes
             for img in soup.find_all('img'):
                 # Try multiple attributes
@@ -174,6 +191,10 @@ class UniversalImageScraper:
         try:
             url_lower = url.lower()
             
+            # CRITICAL: Shopify CDN detection
+            if 'cdn.shopify.com' in url_lower:
+                return True
+            
             # Remove query parameters for extension check
             url_without_query = url_lower.split('?')[0].split('#')[0]
             
@@ -192,7 +213,7 @@ class UniversalImageScraper:
                 '/image/', '/img/', '/photo/', '/picture/', '/pic/', 
                 '/media/', '/asset/', '/upload/', '/content/', 
                 '/gallery/', '/thumbnail/', '/thumb/', '/banner/',
-                '/icon/', '/logo/', '/bg/', '/background/'
+                '/icon/', '/logo/', '/bg/', '/background/', '/files/'
             ]
             
             if any(keyword in url_lower for keyword in image_keywords):
@@ -221,7 +242,27 @@ class UniversalImageScraper:
         images = []
         
         try:
-            # Method 1: Find all URLs in the HTML using regex
+            # Method 1: Extract from Shopify JSON data
+            # Shopify stores product data in <script> tags with type="application/json"
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Look for Shopify product JSON
+            for script in soup.find_all('script', type='application/json'):
+                try:
+                    script_content = script.string
+                    if script_content:
+                        # Find all URLs in the JSON that look like images
+                        json_urls = re.findall(r'https?://[^"\s]+\.(?:jpg|jpeg|png|gif|webp|svg)[^"\s]*', script_content, re.IGNORECASE)
+                        json_urls.extend(re.findall(r'//cdn\.shopify\.com/[^"\s]+', script_content))
+                        
+                        for url in json_urls:
+                            if url.startswith('//'):
+                                url = self.scheme + ':' + url
+                            images.append(url.strip('",\'();[]{}'))
+                except:
+                    pass
+            
+            # Method 2: Find all URLs in the HTML using regex
             all_urls = re.findall(r'https?://[^\s<>"\']+', html)
             all_urls.extend(re.findall(r'//[^\s<>"\']+', html))  # Protocol-relative URLs
             all_urls.extend(re.findall(r'/[^\s<>"\']+\.(jpg|jpeg|png|gif|webp|svg|ico)', html, re.IGNORECASE))
@@ -241,18 +282,23 @@ class UniversalImageScraper:
                 if self.is_image_url(full_url):
                     images.append(full_url)
             
-            # Method 2: Look for base64 encoded images
-            soup = BeautifulSoup(html, 'html.parser')
-            for img in soup.find_all('img'):
-                src = img.get('src', '')
-                if src.startswith('data:image'):
-                    # Skip base64 for now (too large)
-                    pass
+            # Method 3: Look specifically for Shopify CDN URLs
+            shopify_pattern = r'(https?:)?//cdn\.shopify\.com/[^"\s<>\']+\.(jpg|jpeg|png|gif|webp)'
+            shopify_urls = re.findall(shopify_pattern, html, re.IGNORECASE)
+            for match in shopify_urls:
+                url = match[0] + '//cdn.shopify.com/' if not match[0] else match[0] + '//cdn.shopify.com/'
+                # Reconstruct the full match
+                full_match = ''.join([x for x in match if x])
+                if full_match.startswith('//'):
+                    full_match = self.scheme + ':' + full_match
+                images.append(full_match)
         
         except Exception as e:
             pass
         
-        return list(set(images))
+        # Remove duplicates and return
+        return list(set([img for img in images if img]))
+
     
     def crawl_website(self, status_container, progress_callback) -> List[str]:
         """Recursively crawl entire website and collect all image URLs"""
