@@ -232,6 +232,9 @@ class ImageScraper:
 
 def generate_single_ppt(images: List[Tuple[str, bytes]], domain: str, batch_num: int, images_per_slide: int = 4) -> bytes:
     """Generate a single PowerPoint with multiple images per slide"""
+    from pptx.util import Inches
+    from pptx.dml.color import RGBColor
+    
     prs = Presentation()
     prs.slide_width = Inches(10)
     prs.slide_height = Inches(5.625)
@@ -242,10 +245,11 @@ def generate_single_ppt(images: List[Tuple[str, bytes]], domain: str, batch_num:
         batch = images[batch_start:batch_start + images_per_slide]
         slide = prs.slides.add_slide(blank_layout)
         
+        # Set white background with proper RGBColor
         background = slide.background
         fill = background.fill
         fill.solid()
-        fill.fore_color.rgb = (255, 255, 255)
+        fill.fore_color.rgb = RGBColor(255, 255, 255)
         
         num_images = len(batch)
         if num_images == 1:
@@ -298,24 +302,37 @@ def generate_single_ppt(images: List[Tuple[str, bytes]], domain: str, batch_num:
     prs.save(output)
     return output.getvalue()
 
-def create_zip_with_ppts(all_images: List[Tuple[str, bytes]], domain: str, images_per_slide: int) -> bytes:
-    """Create a ZIP file containing multiple PPT files"""
+def create_zip_with_ppts(all_images: List[Tuple[str, bytes]], domain: str, images_per_slide: int, status_container, progress_bar) -> bytes:
+    """Create a ZIP file containing multiple PPT files with progress updates"""
+    from pptx.dml.color import RGBColor
+    
     zip_buffer = io.BytesIO()
     
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
         num_batches = (len(all_images) + IMAGES_PER_PPT - 1) // IMAGES_PER_PPT
         
         for batch_idx in range(num_batches):
+            # Real-time status update
+            status_container.write(f"📊 Generating PPT {batch_idx + 1}/{num_batches}...")
+            
             start_idx = batch_idx * IMAGES_PER_PPT
             end_idx = min(start_idx + IMAGES_PER_PPT, len(all_images))
             batch_images = all_images[start_idx:end_idx]
             
+            # Generate PPT for this batch
             ppt_bytes = generate_single_ppt(batch_images, domain, batch_idx + 1, images_per_slide)
             
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{domain.replace('.', '_')}_products_batch_{batch_idx + 1}_{timestamp}.pptx"
             
             zip_file.writestr(filename, ppt_bytes)
+            
+            # Update progress bar: 0.80 to 1.0
+            batch_progress = 0.80 + (0.20 * (batch_idx + 1) / num_batches)
+            progress_bar.progress(batch_progress)
+            
+            # Update status after each PPT
+            status_container.write(f"✅ Completed PPT {batch_idx + 1}/{num_batches} ({len(batch_images)} images)")
     
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
@@ -444,14 +461,13 @@ def main():
                     type="primary"
                 )
             else:
-                # Multiple PPTs - create ZIP
-                status_container.write(f"📦 Packaging {num_ppts} PPT files into ZIP archive...")
-                zip_bytes = create_zip_with_ppts(valid_images, scraper.domain, images_per_slide)
+                # Multiple PPTs - create ZIP with live updates
+                status_container.write(f"📦 Creating {num_ppts} PowerPoint files automatically...")
+                zip_bytes = create_zip_with_ppts(valid_images, scraper.domain, images_per_slide, status_container, progress_bar)
                 
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 zip_filename = f"{scraper.domain.replace('.', '_')}_products_{num_ppts}_files_{timestamp}.zip"
                 
-                progress_bar.progress(1.0)
                 status_container.update(label="✅ Complete!", state="complete")
                 
                 total_slides = (len(valid_images) + images_per_slide - 1) // images_per_slide
