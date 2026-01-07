@@ -191,10 +191,6 @@ class UniversalImageScraper:
         try:
             url_lower = url.lower()
             
-            # CRITICAL: Shopify CDN detection
-            if 'cdn.shopify.com' in url_lower:
-                return True
-            
             # Remove query parameters for extension check
             url_without_query = url_lower.split('?')[0].split('#')[0]
             
@@ -213,7 +209,7 @@ class UniversalImageScraper:
                 '/image/', '/img/', '/photo/', '/picture/', '/pic/', 
                 '/media/', '/asset/', '/upload/', '/content/', 
                 '/gallery/', '/thumbnail/', '/thumb/', '/banner/',
-                '/icon/', '/logo/', '/bg/', '/background/', '/files/'
+                '/icon/', '/logo/', '/bg/', '/background/'
             ]
             
             if any(keyword in url_lower for keyword in image_keywords):
