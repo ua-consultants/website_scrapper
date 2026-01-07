@@ -12,24 +12,26 @@ import time
 import re
 from typing import List, Dict, Set, Tuple
 import concurrent.futures
+import zipfile
 
 # Page config
 st.set_page_config(page_title="E-Commerce to PPT", page_icon="🛋️", layout="wide")
 
-# Constants optimized for FREE TIER (1GB RAM limit)
+# Constants optimized for FREE TIER with batch processing
 PRODUCT_CONTAINERS = {'product', 'item', 'card', 'collection', 'gallery', 'grid', 'listing'}
 IGNORE_CONTAINERS = {'header', 'footer', 'nav', 'menu', 'svg', 'button', 'icon', 'logo'}
 REJECT_KEYWORDS = {'logo', 'icon', 'sprite', 'badge', 'arrow', 'cart', 'heart', 'star',
                    'payment', 'visa', 'mastercard', 'banner', 'slider', 'ad', 'thumb'}
 ACCEPT_KEYWORDS = {'product', 'item', 'furniture', 'sofa', 'chair', 'table', 'bed', 
                    'cabinet', 'desk', 'couch', 'dresser', 'shelf'}
-MIN_WIDTH = 500  # Reduced for faster processing
+MIN_WIDTH = 500
 MIN_HEIGHT = 500
 MIN_SQUARE = 350
-MAX_IMAGES = 30  # CRITICAL: Reduced from 100 to prevent memory issues
-MAX_PAGES = 3    # CRITICAL: Reduced from 10 to stay within limits
-TIMEOUT = 8      # Reduced timeout
-MAX_FILE_SIZE = 800 * 1024  # 800KB max per image to prevent memory bloat
+IMAGES_PER_PPT = 50  # Batch size for each PPT file
+MAX_TOTAL_IMAGES = 200  # Maximum total images to scrape
+MAX_PAGES = 5  # Increased to get more images
+TIMEOUT = 8
+MAX_FILE_SIZE = 800 * 1024
 
 class ImageScraper:
     def __init__(self, base_url: str):
@@ -50,8 +52,6 @@ class ImageScraper:
             response = self.session.get(self.base_url, timeout=TIMEOUT)
             response.raise_for_status()
             
-            # FREE TIER OPTIMIZATION: Always use requests (no Selenium)
-            # Selenium uses too much memory on free tier
             status_container.write("📄 Using fast scraping (optimized for free tier)")
             return "requests"
         except Exception as e:
@@ -109,8 +109,7 @@ class ImageScraper:
                     'alt': img.get('alt', '').lower()
                 })
                 
-                # Memory protection: limit candidates per page
-                if len(candidates) >= 50:
+                if len(candidates) >= 100:
                     break
         except Exception:
             pass
@@ -125,14 +124,12 @@ class ImageScraper:
             url = candidate['url']
             context = candidate['context'].lower()
             
-            # Rule 1: DOM Context
             has_product_context = any(kw in context for kw in PRODUCT_CONTAINERS)
             has_ignore_context = any(kw in context for kw in IGNORE_CONTAINERS)
             
             if has_ignore_context:
                 continue
             
-            # Rule 2: URL/Filename filtering
             url_lower = url.lower()
             has_reject = any(kw in url_lower for kw in REJECT_KEYWORDS)
             has_accept = any(kw in url_lower for kw in ACCEPT_KEYWORDS)
@@ -140,63 +137,53 @@ class ImageScraper:
             if has_reject and not has_accept:
                 continue
             
-            # Rule 3: Must be real image format
             if not re.search(r'\.(jpg|jpeg|png|webp)', url_lower):
                 continue
             
-            # Prioritize images with product context or accept keywords
             if has_product_context or has_accept:
                 filtered.append(url)
         
         return list(set(filtered))
     
-    def download_and_validate_images(self, urls: List[str], progress_bar, status_container) -> List[Tuple[str, bytes]]:
-        """Download and validate images - MEMORY OPTIMIZED"""
+    def download_and_validate_images(self, urls: List[str], progress_bar, status_container, max_images: int = MAX_TOTAL_IMAGES) -> List[Tuple[str, bytes]]:
+        """Download and validate images - MEMORY OPTIMIZED with streaming"""
         valid_images = []
         
         def process_image(url):
             try:
-                # Stream download with size check
                 response = self.session.get(url, timeout=TIMEOUT, stream=True)
                 response.raise_for_status()
                 
-                # Check content length before downloading
                 content_length = response.headers.get('content-length')
                 if content_length and int(content_length) > MAX_FILE_SIZE:
                     return None
                 
-                # Read with size limit
                 img_bytes = b''
                 for chunk in response.iter_content(chunk_size=8192):
                     img_bytes += chunk
                     if len(img_bytes) > MAX_FILE_SIZE:
                         return None
                 
-                # Check hash for duplicates
                 img_hash = hashlib.sha256(img_bytes).hexdigest()
                 if img_hash in self.seen_hashes:
                     return None
                 
-                # Validate dimensions
                 try:
                     img = Image.open(io.BytesIO(img_bytes))
                     width, height = img.size
                     
-                    # Dimension checks
                     if width < MIN_WIDTH or height < MIN_HEIGHT:
                         return None
                     
                     if width == height and width < MIN_SQUARE:
                         return None
                     
-                    # MEMORY OPTIMIZATION: Resize large images
                     max_dimension = 1920
                     if width > max_dimension or height > max_dimension:
                         ratio = min(max_dimension/width, max_dimension/height)
                         new_size = (int(width * ratio), int(height * ratio))
                         img = img.resize(new_size, Image.Resampling.LANCZOS)
                     
-                    # Convert to RGB if needed
                     if img.mode in ('RGBA', 'LA', 'P'):
                         background = Image.new('RGB', img.size, (255, 255, 255))
                         if img.mode == 'P':
@@ -206,7 +193,6 @@ class ImageScraper:
                     elif img.mode != 'RGB':
                         img = img.convert('RGB')
                     
-                    # Compress to save memory
                     output = io.BytesIO()
                     img.save(output, format='JPEG', quality=75, optimize=True)
                     final_bytes = output.getvalue()
@@ -220,97 +206,148 @@ class ImageScraper:
             except Exception:
                 return None
         
-        total = min(len(urls), MAX_IMAGES)
+        total = min(len(urls), max_images)
         processed = 0
         
-        # Process with limited concurrency (memory protection)
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {executor.submit(process_image, url): url for url in urls[:MAX_IMAGES]}
+            futures = {executor.submit(process_image, url): url for url in urls[:max_images]}
             
             for future in concurrent.futures.as_completed(futures):
                 processed += 1
-                progress_bar.progress(processed / total)
+                progress_bar.progress(min(processed / total, 1.0))
                 result = future.result()
                 if result:
                     valid_images.append(result)
-                    status_container.write(f"✅ Image {len(valid_images)}/{MAX_IMAGES}")
+                    if len(valid_images) % 10 == 0:
+                        status_container.write(f"✅ Downloaded {len(valid_images)} images...")
                     
-                    if len(valid_images) >= MAX_IMAGES:
-                        # Cancel remaining futures
+                    if len(valid_images) >= max_images:
                         for f in futures:
                             f.cancel()
                         break
         
         return valid_images
 
-@st.cache_data(ttl=3600)
-def generate_ppt(images: List[Tuple[str, bytes]], domain: str) -> bytes:
-    """Generate PowerPoint with one image per slide"""
+def generate_single_ppt(images: List[Tuple[str, bytes]], domain: str, batch_num: int, images_per_slide: int = 4) -> bytes:
+    """Generate a single PowerPoint with multiple images per slide"""
     prs = Presentation()
     prs.slide_width = Inches(10)
-    prs.slide_height = Inches(5.625)  # 16:9 ratio
+    prs.slide_height = Inches(5.625)
     
     blank_layout = prs.slide_layouts[6]
     
-    for url, img_bytes in images:
+    for batch_start in range(0, len(images), images_per_slide):
+        batch = images[batch_start:batch_start + images_per_slide]
         slide = prs.slides.add_slide(blank_layout)
         
-        # Set white background
         background = slide.background
         fill = background.fill
         fill.solid()
         fill.fore_color.rgb = (255, 255, 255)
         
-        # Load image
-        img = Image.open(io.BytesIO(img_bytes))
-        img_width, img_height = img.size
+        num_images = len(batch)
+        if num_images == 1:
+            grid = [(0, 0)]
+            cols, rows = 1, 1
+        elif num_images == 2:
+            grid = [(0, 0), (1, 0)]
+            cols, rows = 2, 1
+        elif num_images == 3:
+            grid = [(0, 0), (1, 0), (0, 1)]
+            cols, rows = 2, 2
+        else:
+            grid = [(0, 0), (1, 0), (0, 1), (1, 1)]
+            cols, rows = 2, 2
         
-        # Calculate scaling
         slide_width = prs.slide_width.inches
         slide_height = prs.slide_height.inches
         
-        img_ratio = img_width / img_height
-        slide_ratio = slide_width / slide_height
+        margin = 0.3
+        h_spacing = 0.2
+        v_spacing = 0.2
         
-        if img_ratio > slide_ratio:
-            width = Inches(slide_width * 0.9)
-            height = Inches((slide_width * 0.9) / img_ratio)
-        else:
-            height = Inches(slide_height * 0.9)
-            width = Inches((slide_height * 0.9) * img_ratio)
+        available_width = slide_width - (2 * margin) - ((cols - 1) * h_spacing)
+        available_height = slide_height - (2 * margin) - ((rows - 1) * v_spacing)
         
-        # Center position
-        left = Inches((slide_width - width.inches) / 2)
-        top = Inches((slide_height - height.inches) / 2)
+        cell_width = available_width / cols
+        cell_height = available_height / rows
         
-        # Add image
-        img_stream = io.BytesIO(img_bytes)
-        slide.shapes.add_picture(img_stream, left, top, width, height)
+        for idx, (url, img_bytes) in enumerate(batch):
+            col, row = grid[idx]
+            
+            img = Image.open(io.BytesIO(img_bytes))
+            img_width, img_height = img.size
+            img_ratio = img_width / img_height
+            
+            if img_ratio > (cell_width / cell_height):
+                width = Inches(cell_width)
+                height = Inches(cell_width / img_ratio)
+            else:
+                height = Inches(cell_height)
+                width = Inches(cell_height * img_ratio)
+            
+            left = Inches(margin + (col * (cell_width + h_spacing)) + (cell_width - width.inches) / 2)
+            top = Inches(margin + (row * (cell_height + v_spacing)) + (cell_height - height.inches) / 2)
+            
+            img_stream = io.BytesIO(img_bytes)
+            slide.shapes.add_picture(img_stream, left, top, width, height)
     
-    # Save to bytes
     output = io.BytesIO()
     prs.save(output)
     return output.getvalue()
 
+def create_zip_with_ppts(all_images: List[Tuple[str, bytes]], domain: str, images_per_slide: int) -> bytes:
+    """Create a ZIP file containing multiple PPT files"""
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        num_batches = (len(all_images) + IMAGES_PER_PPT - 1) // IMAGES_PER_PPT
+        
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * IMAGES_PER_PPT
+            end_idx = min(start_idx + IMAGES_PER_PPT, len(all_images))
+            batch_images = all_images[start_idx:end_idx]
+            
+            ppt_bytes = generate_single_ppt(batch_images, domain, batch_idx + 1, images_per_slide)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{domain.replace('.', '_')}_products_batch_{batch_idx + 1}_{timestamp}.pptx"
+            
+            zip_file.writestr(filename, ppt_bytes)
+    
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
+
 def main():
     st.title("🛋️ E-Commerce Product Image to PowerPoint")
-    st.markdown("**Optimized for Streamlit Free Tier** • Extract product images from furniture websites")
+    st.markdown("**Multi-PPT Batch Generator** • Automatically creates multiple 50-image PPTs")
     
-    # Resource warning
-    with st.expander("ℹ️ Free Tier Optimizations", expanded=False):
+    with st.expander("ℹ️ How Batch Generation Works", expanded=False):
         st.info(f"""
-        **Memory-Optimized Settings:**
-        - Maximum {MAX_IMAGES} images per PPT
-        - Maximum {MAX_PAGES} pages scraped
-        - Images resized to 1920px max
-        - Fast scraping only (no browser automation)
+        **Smart Batch Processing:**
+        - Scrapes up to {MAX_TOTAL_IMAGES} product images
+        - Automatically splits into batches of {IMAGES_PER_PPT} images
+        - Each batch becomes a separate PPT file
+        - All PPTs packaged in a single ZIP download
+        - {4} images per slide (2×2 grid layout)
         
-        These limits ensure the app runs smoothly on Streamlit's free tier (1GB RAM).
+        **Example:** 150 images → 3 PPT files (50 images each) in one ZIP
+        
+        **Benefits:**
+        - Faster processing (no waiting for huge files)
+        - Easier to manage and share
+        - More reliable on free tier
         """)
     
     url = st.text_input("🌐 Enter E-Commerce Website URL:", placeholder="https://example-furniture-store.com")
     
-    if st.button("🚀 Generate PPT", type="primary"):
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        generate_btn = st.button("🚀 Generate PPTs", type="primary", use_container_width=True)
+    with col2:
+        images_per_slide = st.selectbox("Images/Slide", [2, 3, 4], index=2)
+    
+    if generate_btn:
         if not url:
             st.error("Please enter a valid URL")
             return
@@ -319,33 +356,33 @@ def main():
             url = 'https://' + url
         
         progress_bar = st.progress(0)
-        status_container = st.status("Starting scraping process...", expanded=True)
+        status_container = st.status("Starting batch scraping process...", expanded=True)
         
         try:
             scraper = ImageScraper(url)
             
             # Step 1: Analyze site
-            progress_bar.progress(10)
+            progress_bar.progress(5)
             method = scraper.analyze_site(status_container)
             
             # Step 2: Crawl pages
-            progress_bar.progress(20)
+            progress_bar.progress(10)
             pages = scraper.crawl_pages(status_container)
             
             # Step 3: Extract and filter images
-            progress_bar.progress(30)
+            progress_bar.progress(15)
             all_candidates = []
             
             for i, page in enumerate(pages):
                 status_container.write(f"📄 Scraping page {i+1}/{len(pages)}")
                 candidates = scraper.extract_candidate_images(page)
                 all_candidates.extend(candidates)
-                progress_bar.progress(30 + (20 * (i+1) / len(pages)))
+                progress_bar.progress(15 + (10 * (i+1) / len(pages)))
             
             status_container.write(f"🔍 Found {len(all_candidates)} candidate images")
             
             # Step 4: Filter product images
-            progress_bar.progress(50)
+            progress_bar.progress(25)
             filtered_urls = scraper.filter_product_images(all_candidates)
             status_container.write(f"✅ Filtered to {len(filtered_urls)} product images")
             
@@ -354,13 +391,15 @@ def main():
                 st.error("No product images found. Try a different URL with visible product images.")
                 return
             
-            # Step 5: Download and validate
-            progress_bar.progress(60)
-            status_container.write(f"⬇️ Downloading up to {MAX_IMAGES} images...")
+            # Step 5: Download and validate (up to MAX_TOTAL_IMAGES)
+            progress_bar.progress(30)
+            status_container.write(f"⬇️ Downloading up to {MAX_TOTAL_IMAGES} images...")
+            
             valid_images = scraper.download_and_validate_images(
-                filtered_urls, 
-                progress_bar, 
-                status_container
+                filtered_urls,
+                progress_bar,
+                status_container,
+                max_images=MAX_TOTAL_IMAGES
             )
             
             if not valid_images:
@@ -368,46 +407,86 @@ def main():
                 st.error("All images failed validation. The site may have anti-scraping measures.")
                 return
             
-            status_container.write(f"✅ Successfully downloaded {len(valid_images)} images")
+            status_container.write(f"✅ Successfully downloaded {len(valid_images)} unique images")
             
-            # Step 6: Generate PPT
-            progress_bar.progress(90)
-            status_container.write("📊 Generating PowerPoint...")
+            # Step 6: Generate multiple PPTs in batches
+            progress_bar.progress(80)
+            num_ppts = (len(valid_images) + IMAGES_PER_PPT - 1) // IMAGES_PER_PPT
+            status_container.write(f"📊 Generating {num_ppts} PowerPoint file(s) ({IMAGES_PER_PPT} images each)...")
             
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{scraper.domain.replace('.', '_')}_products_{timestamp}.pptx"
-            
-            ppt_bytes = generate_ppt(valid_images, scraper.domain)
-            
-            progress_bar.progress(100)
-            status_container.update(label="✅ Complete!", state="complete")
-            
-            # Display results
-            st.success(f"🎉 Successfully created PowerPoint with {len(valid_images)} product images!")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Images", len(valid_images))
-            with col2:
-                st.metric("Pages Scraped", len(pages))
-            with col3:
-                st.metric("File Size", f"{len(ppt_bytes) / 1024 / 1024:.1f} MB")
-            
-            # Download button
-            st.download_button(
-                label="📥 Download PowerPoint",
-                data=ppt_bytes,
-                file_name=filename,
-                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                type="primary"
-            )
+            if num_ppts == 1:
+                # Single PPT - direct download
+                ppt_bytes = generate_single_ppt(valid_images, scraper.domain, 1, images_per_slide)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"{scraper.domain.replace('.', '_')}_products_{timestamp}.pptx"
+                
+                progress_bar.progress(100)
+                status_container.update(label="✅ Complete!", state="complete")
+                
+                num_slides = (len(valid_images) + images_per_slide - 1) // images_per_slide
+                st.success(f"🎉 Created 1 PowerPoint with {len(valid_images)} images across {num_slides} slides!")
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Images", len(valid_images))
+                with col2:
+                    st.metric("PPT Files", 1)
+                with col3:
+                    st.metric("File Size", f"{len(ppt_bytes) / 1024 / 1024:.1f} MB")
+                
+                st.download_button(
+                    label="📥 Download PowerPoint",
+                    data=ppt_bytes,
+                    file_name=filename,
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    type="primary"
+                )
+            else:
+                # Multiple PPTs - create ZIP
+                status_container.write(f"📦 Packaging {num_ppts} PPT files into ZIP archive...")
+                zip_bytes = create_zip_with_ppts(valid_images, scraper.domain, images_per_slide)
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                zip_filename = f"{scraper.domain.replace('.', '_')}_products_{num_ppts}_files_{timestamp}.zip"
+                
+                progress_bar.progress(100)
+                status_container.update(label="✅ Complete!", state="complete")
+                
+                total_slides = (len(valid_images) + images_per_slide - 1) // images_per_slide
+                st.success(f"🎉 Created {num_ppts} PowerPoint files with {len(valid_images)} total images!")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Images", len(valid_images))
+                with col2:
+                    st.metric("PPT Files", num_ppts)
+                with col3:
+                    st.metric("Images/PPT", IMAGES_PER_PPT)
+                with col4:
+                    st.metric("ZIP Size", f"{len(zip_bytes) / 1024 / 1024:.1f} MB")
+                
+                st.download_button(
+                    label=f"📥 Download ZIP ({num_ppts} PPT files)",
+                    data=zip_bytes,
+                    file_name=zip_filename,
+                    mime="application/zip",
+                    type="primary"
+                )
+                
+                with st.expander("📋 What's in the ZIP?"):
+                    st.write(f"**{num_ppts} PowerPoint files:**")
+                    for i in range(num_ppts):
+                        start = i * IMAGES_PER_PPT
+                        end = min(start + IMAGES_PER_PPT, len(valid_images))
+                        slides = (end - start + images_per_slide - 1) // images_per_slide
+                        st.write(f"- `batch_{i+1}.pptx` - Images {start+1}-{end} ({slides} slides)")
             
             # Preview
-            st.subheader("🖼️ Preview (First 5 Images)")
-            cols = st.columns(5)
-            for i, (url, img_bytes) in enumerate(valid_images[:5]):
+            st.subheader("🖼️ Preview (First 6 Images)")
+            cols = st.columns(6)
+            for i, (url, img_bytes) in enumerate(valid_images[:6]):
                 with cols[i]:
-                    st.image(img_bytes, use_container_width=True, caption=f"Image {i+1}")
+                    st.image(img_bytes, use_container_width=True, caption=f"#{i+1}")
         
         except Exception as e:
             status_container.update(label=f"❌ Error: {str(e)}", state="error")
