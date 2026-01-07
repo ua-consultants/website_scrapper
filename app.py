@@ -77,62 +77,182 @@ class UniversalImageScraper:
         try:
             soup = BeautifulSoup(html, 'html.parser')
             
-            # Method 1: <img> tags
+            # Method 1: <img> tags with all possible attributes
             for img in soup.find_all('img'):
-                src = img.get('src') or img.get('data-src') or img.get('data-lazy-src') or img.get('data-original')
+                # Try multiple attributes
+                src = (img.get('src') or 
+                       img.get('data-src') or 
+                       img.get('data-lazy-src') or 
+                       img.get('data-original') or
+                       img.get('data-lazy') or
+                       img.get('data-srcset') or
+                       img.get('data-fallback-src'))
+                
                 if src:
                     full_url = urljoin(page_url, src)
-                    if self.is_image_url(full_url):
+                    images.append(full_url)
+                
+                # Handle srcset attribute
+                srcset = img.get('srcset')
+                if srcset:
+                    for src_entry in srcset.split(','):
+                        url = src_entry.strip().split()[0]
+                        full_url = urljoin(page_url, url)
                         images.append(full_url)
             
             # Method 2: <picture> tags
             for picture in soup.find_all('picture'):
                 for source in picture.find_all('source'):
-                    srcset = source.get('srcset')
+                    srcset = source.get('srcset') or source.get('data-srcset')
                     if srcset:
-                        # Handle srcset with multiple URLs
                         for src in srcset.split(','):
                             url = src.strip().split()[0]
                             full_url = urljoin(page_url, url)
-                            if self.is_image_url(full_url):
-                                images.append(full_url)
+                            images.append(full_url)
             
-            # Method 3: CSS background images
+            # Method 3: <source> tags (video posters, etc.)
+            for source in soup.find_all('source'):
+                src = source.get('src')
+                if src and self.is_image_url(src):
+                    full_url = urljoin(page_url, src)
+                    images.append(full_url)
+            
+            # Method 4: CSS background images in style attributes
             for tag in soup.find_all(style=True):
-                style = tag['style']
-                urls = re.findall(r'url\([\'"]?([^\'"]+)[\'"]?\)', style)
+                style = tag.get('style', '')
+                urls = re.findall(r'url\([\'"]?([^\'"()]+)[\'"]?\)', style)
                 for url in urls:
                     full_url = urljoin(page_url, url)
-                    if self.is_image_url(full_url):
-                        images.append(full_url)
+                    images.append(full_url)
             
-            # Method 4: <link> tags with image rels
-            for link in soup.find_all('link', rel=True):
-                if any(r in ['image', 'icon', 'apple-touch-icon'] for r in link['rel']):
+            # Method 5: <link> tags with image rels
+            for link in soup.find_all('link'):
+                rel = link.get('rel', [])
+                if isinstance(rel, list):
+                    rel = ' '.join(rel)
+                if any(keyword in str(rel).lower() for keyword in ['image', 'icon', 'apple-touch']):
                     href = link.get('href')
                     if href:
                         full_url = urljoin(page_url, href)
-                        if self.is_image_url(full_url):
-                            images.append(full_url)
+                        images.append(full_url)
+            
+            # Method 6: <meta> tags with image properties
+            for meta in soup.find_all('meta'):
+                property_val = meta.get('property', '')
+                name_val = meta.get('name', '')
+                if 'image' in property_val.lower() or 'image' in name_val.lower():
+                    content = meta.get('content')
+                    if content:
+                        full_url = urljoin(page_url, content)
+                        images.append(full_url)
+            
+            # Method 7: Look for data attributes that might contain images
+            for tag in soup.find_all(True):
+                for attr, value in tag.attrs.items():
+                    if isinstance(value, str) and attr.startswith('data-') and self.is_image_url(value):
+                        full_url = urljoin(page_url, value)
+                        images.append(full_url)
             
         except Exception as e:
             pass
         
-        return list(set(images))
+        # Filter to keep only valid image URLs and remove duplicates
+        valid_images = []
+        seen = set()
+        for img_url in images:
+            if img_url not in seen and self.is_image_url(img_url):
+                valid_images.append(img_url)
+                seen.add(img_url)
+        
+        return valid_images
     
     def is_image_url(self, url: str) -> bool:
-        """Check if URL points to an image"""
+        """Check if URL points to an image - very permissive"""
+        if not url or len(url) < 4:
+            return False
+        
         try:
             url_lower = url.lower()
-            # Check for image extensions
-            if re.search(r'\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff|tif)(\?|$)', url_lower):
+            
+            # Remove query parameters for extension check
+            url_without_query = url_lower.split('?')[0].split('#')[0]
+            
+            # Check for common image extensions
+            image_extensions = [
+                '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', 
+                '.svg', '.ico', '.tiff', '.tif', '.avif', '.jfif',
+                '.pjpeg', '.pjp', '.apng', '.heic', '.heif'
+            ]
+            
+            if any(url_without_query.endswith(ext) for ext in image_extensions):
                 return True
-            # Check for image-like paths
-            if any(keyword in url_lower for keyword in ['/image/', '/img/', '/photo/', '/picture/', '/media/']):
+            
+            # Check for image-related keywords in path
+            image_keywords = [
+                '/image/', '/img/', '/photo/', '/picture/', '/pic/', 
+                '/media/', '/asset/', '/upload/', '/content/', 
+                '/gallery/', '/thumbnail/', '/thumb/', '/banner/',
+                '/icon/', '/logo/', '/bg/', '/background/'
+            ]
+            
+            if any(keyword in url_lower for keyword in image_keywords):
                 return True
+            
+            # Check for image CDN patterns
+            cdn_patterns = [
+                'cloudinary', 'imgix', 'cloudflare', 'fastly',
+                'akamai', 'images', 'static', 'cdn', 'assets'
+            ]
+            
+            if any(pattern in url_lower for pattern in cdn_patterns):
+                return True
+            
+            # If URL has image in query params (e.g., ?image=...)
+            if 'image' in url_lower or 'img' in url_lower or 'photo' in url_lower:
+                return True
+                
         except:
             pass
+        
         return False
+    
+    def extract_images_aggressive(self, html: str, page_url: str) -> List[str]:
+        """Aggressive extraction - finds any URL that looks like an image"""
+        images = []
+        
+        try:
+            # Method 1: Find all URLs in the HTML using regex
+            all_urls = re.findall(r'https?://[^\s<>"\']+', html)
+            all_urls.extend(re.findall(r'//[^\s<>"\']+', html))  # Protocol-relative URLs
+            all_urls.extend(re.findall(r'/[^\s<>"\']+\.(jpg|jpeg|png|gif|webp|svg|ico)', html, re.IGNORECASE))
+            
+            for url in all_urls:
+                # Clean up the URL
+                url = url.strip('",\'();[]{}')
+                
+                # Convert protocol-relative URLs
+                if url.startswith('//'):
+                    url = self.scheme + ':' + url
+                
+                # Make absolute
+                full_url = urljoin(page_url, url)
+                
+                # Check if it's an image
+                if self.is_image_url(full_url):
+                    images.append(full_url)
+            
+            # Method 2: Look for base64 encoded images
+            soup = BeautifulSoup(html, 'html.parser')
+            for img in soup.find_all('img'):
+                src = img.get('src', '')
+                if src.startswith('data:image'):
+                    # Skip base64 for now (too large)
+                    pass
+        
+        except Exception as e:
+            pass
+        
+        return list(set(images))
     
     def crawl_website(self, status_container, progress_callback) -> List[str]:
         """Recursively crawl entire website and collect all image URLs"""
@@ -163,6 +283,12 @@ class UniversalImageScraper:
                     
                     # Extract images
                     page_images = self.extract_all_images(html, url)
+                    
+                    # Fallback: if no images found, try aggressive extraction
+                    if not page_images:
+                        status_container.write(f"   🔍 No images with standard methods, trying aggressive extraction...")
+                        page_images = self.extract_images_aggressive(html, url)
+                    
                     total_images.extend(page_images)
                     
                     status_container.write(f"   ✅ Found {len(page_images)} images on this page (Total: {len(total_images)})")
@@ -178,8 +304,10 @@ class UniversalImageScraper:
                 except Exception as e:
                     status_container.write(f"   ⚠️ Error: {str(e)[:60]}")
         
-        status_container.write(f"✅ Crawl complete! Found {len(total_images)} total image URLs across {page_count} pages")
-        return list(set(total_images))  # Remove duplicates
+        # Remove duplicates and filter
+        unique_images = list(set(total_images))
+        status_container.write(f"✅ Crawl complete! Found {len(unique_images)} unique image URLs across {page_count} pages")
+        return unique_images
     
     def download_and_validate_image(self, url: str) -> Tuple[str, bytes] or None:
         """Download and validate a single image"""
@@ -405,6 +533,20 @@ def main():
         **Note:** Large websites may take several minutes to crawl.
         """)
     
+    with st.expander("🧪 Test URLs", expanded=False):
+        st.markdown("""
+        **Try these example sites:**
+        - `https://example.com` (Small, simple site)
+        - `https://unsplash.com` (Photo gallery)
+        - Any public website URL
+        
+        **Tips:**
+        - Use the homepage URL (e.g., `https://example.com`)
+        - Include `www.` if the site uses it
+        - Make sure the site is publicly accessible
+        - Be patient - large sites take longer
+        """)
+    
     url = st.text_input("🌐 Enter Website URL:", placeholder="https://example.com")
     
     if st.button("🚀 Scrape ALL Images", type="primary"):
@@ -428,13 +570,25 @@ def main():
             
             # Step 1: Crawl website and collect image URLs
             status_container.write("🔍 Phase 1: Crawling website and discovering images...")
+            status_container.write(f"Target domain: {scraper.domain}")
+            status_container.write(f"Starting URL: {url}")
             progress_bar.progress(0.1)
             
             image_urls = scraper.crawl_website(status_container, update_progress)
             
             if not image_urls:
                 status_container.update(label="❌ No images found", state="error")
-                st.error("No images found on this website.")
+                st.error(f"""
+                No images found on this website. Possible reasons:
+                - The website may block automated scraping
+                - The URL might be incorrect
+                - The site might not have any images
+                - Try a different page on the site
+                
+                Debug info:
+                - Pages crawled: {len(scraper.visited_urls)}
+                - Image URLs found: 0
+                """)
                 return
             
             status_container.write(f"📊 Phase 1 Complete: Found {len(image_urls)} image URLs")
