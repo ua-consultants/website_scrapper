@@ -140,8 +140,6 @@ class ShopifyImageScraper:
             status_container.write(f"✅ Extracted {len(unique_urls)} image URLs via fallback method")
         
         return unique_urls
-    
-    def extract_all_image_urls(self, products, status_container):
         """Extract all image URLs from product data"""
         image_urls = []
         
@@ -505,42 +503,32 @@ def main():
             
             products = scraper.get_all_products(status_container)
             
-            image_urls = []
-            
-            # If API failed, try fallback method
             if not products:
-                status_container.write("🔄 API unavailable. Trying alternative scraping method...")
-                progress_bar.progress(0.2)
+                st.session_state.is_scraping = False
+                status_container.update(label="❌ No products found", state="error")
+                st.error("""
+                No products found. This could mean:
+                - The site is not a Shopify store
+                - The Shopify API is not publicly accessible
+                - The URL is incorrect
                 
-                image_urls = scraper.get_products_from_collections(status_container)
-                
-                if not image_urls:
-                    st.session_state.is_scraping = False
-                    status_container.update(label="❌ No images found", state="error")
-                    st.error("""
-                    Unable to extract images from this site. Possible reasons:
-                    - The Shopify API is restricted (503 error)
-                    - The site has strong anti-scraping protection
-                    - The URL might be incorrect
-                    - The site might not be a standard Shopify store
-                    
-                    Try:
-                    - Using the main homepage URL (e.g., https://store.com)
-                    - Checking if the site is actually accessible in a browser
-                    - Trying a different Shopify store
-                    """)
-                    return
-            else:
-                progress_bar.progress(0.3)
-                
-                # Step 2: Extract image URLs from products
-                status_container.write(f"🔍 Phase 2: Extracting images from products...")
-                image_urls = scraper.extract_all_image_urls(products, status_container)
+                Try:
+                - Verifying the URL is correct
+                - Checking if it's a Shopify store (look for "myshopify.com" in page source)
+                - Trying the homepage URL
+                """)
+                return
+            
+            progress_bar.progress(0.3)
+            
+            # Step 2: Extract image URLs
+            status_container.write(f"🔍 Phase 2: Extracting images from products...")
+            image_urls = scraper.extract_all_image_urls(products, status_container)
             
             if not image_urls:
                 st.session_state.is_scraping = False
                 status_container.update(label="❌ No images found", state="error")
-                st.error("Products/pages found but no images could be extracted.")
+                st.error("Products found but no images extracted.")
                 return
             
             progress_bar.progress(0.5)
