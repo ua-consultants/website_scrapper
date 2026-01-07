@@ -307,33 +307,44 @@ def create_zip_with_ppts(all_images: List[Tuple[str, bytes]], domain: str, image
     from pptx.dml.color import RGBColor
     
     zip_buffer = io.BytesIO()
+    num_batches = (len(all_images) + IMAGES_PER_PPT - 1) // IMAGES_PER_PPT
+    
+    status_container.write(f"🔄 Starting batch generation for {num_batches} PPT files...")
     
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        num_batches = (len(all_images) + IMAGES_PER_PPT - 1) // IMAGES_PER_PPT
-        
         for batch_idx in range(num_batches):
-            # Real-time status update
-            status_container.write(f"📊 Generating PPT {batch_idx + 1}/{num_batches}...")
-            
+            # Calculate batch range
             start_idx = batch_idx * IMAGES_PER_PPT
             end_idx = min(start_idx + IMAGES_PER_PPT, len(all_images))
             batch_images = all_images[start_idx:end_idx]
             
-            # Generate PPT for this batch
-            ppt_bytes = generate_single_ppt(batch_images, domain, batch_idx + 1, images_per_slide)
+            # Real-time status update BEFORE generation
+            status_container.write(f"📊 Generating PPT {batch_idx + 1}/{num_batches} (images {start_idx + 1}-{end_idx})...")
             
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{domain.replace('.', '_')}_products_batch_{batch_idx + 1}_{timestamp}.pptx"
-            
-            zip_file.writestr(filename, ppt_bytes)
-            
-            # Update progress bar: 0.80 to 1.0
-            batch_progress = 0.80 + (0.20 * (batch_idx + 1) / num_batches)
-            progress_bar.progress(batch_progress)
-            
-            # Update status after each PPT
-            status_container.write(f"✅ Completed PPT {batch_idx + 1}/{num_batches} ({len(batch_images)} images)")
+            try:
+                # Generate PPT for this batch
+                ppt_bytes = generate_single_ppt(batch_images, domain, batch_idx + 1, images_per_slide)
+                
+                # Create unique filename
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"{domain.replace('.', '_')}_batch_{batch_idx + 1}_of_{num_batches}_{timestamp}.pptx"
+                
+                # Write to ZIP
+                zip_file.writestr(filename, ppt_bytes)
+                
+                # Update progress bar: 0.80 to 1.0
+                batch_progress = 0.80 + (0.20 * (batch_idx + 1) / num_batches)
+                progress_bar.progress(min(batch_progress, 1.0))
+                
+                # Success message AFTER generation
+                num_slides = (len(batch_images) + images_per_slide - 1) // images_per_slide
+                status_container.write(f"✅ Completed PPT {batch_idx + 1}/{num_batches} ({len(batch_images)} images, {num_slides} slides)")
+                
+            except Exception as e:
+                status_container.write(f"⚠️ Error generating PPT {batch_idx + 1}: {str(e)[:100]}")
+                raise
     
+    status_container.write(f"🎉 All {num_batches} PPT files generated successfully!")
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
 
@@ -431,10 +442,12 @@ def main():
             # Step 6: Generate multiple PPTs in batches
             progress_bar.progress(0.80)
             num_ppts = (len(valid_images) + IMAGES_PER_PPT - 1) // IMAGES_PER_PPT
-            status_container.write(f"📊 Generating {num_ppts} PowerPoint file(s) ({IMAGES_PER_PPT} images each)...")
+            
+            status_container.write(f"📊 Total images: {len(valid_images)}, Will create: {num_ppts} PPT file(s)")
             
             if num_ppts == 1:
                 # Single PPT - direct download
+                status_container.write(f"📊 Generating 1 PowerPoint file...")
                 ppt_bytes = generate_single_ppt(valid_images, scraper.domain, 1, images_per_slide)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"{scraper.domain.replace('.', '_')}_products_{timestamp}.pptx"
@@ -462,7 +475,9 @@ def main():
                 )
             else:
                 # Multiple PPTs - create ZIP with live updates
-                status_container.write(f"📦 Creating {num_ppts} PowerPoint files automatically...")
+                status_container.write(f"📊 Generating {num_ppts} PowerPoint files ({IMAGES_PER_PPT} images each)...")
+                status_container.write(f"📦 This will create {num_ppts} separate PPT files automatically...")
+                
                 zip_bytes = create_zip_with_ppts(valid_images, scraper.domain, images_per_slide, status_container, progress_bar)
                 
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
